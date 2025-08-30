@@ -1,0 +1,26 @@
+{
+  "name": "@pinesw/rttg",
+  "version": "0.1.0",
+  "description": "Run-Time Type Guards",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "files": [
+    "index.ts",
+    "index.js",
+    "index.js.map",
+    "index.d.ts",
+    "index.d.ts.map",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "PineSW",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}
