@@ -1,27 +1,14 @@
 {
   "compilerOptions": {
-    "module": "nodenext",
-    "target": "esnext",
-    "lib": [
-      "esnext"
-    ],
-    "types": [
-      "node"
-    ],
-    // Other Outputs
+    "strict": true,
     "sourceMap": true,
     "declaration": true,
-    "declarationMap": true,
-    // Stricter Typechecking Options
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    // Recommended Options
-    "strict": true,
-    "noImplicitAny": true,
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
-    "skipLibCheck": true,
-  }
+    "declarationMap": true
+  },
+  "include": [
+    "index.ts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }
