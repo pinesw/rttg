@@ -1,6 +1,6 @@
 {
   "name": "@pinesw/rttg",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Run-Time Type Guards",
   "main": "index.js",
   "types": "index.d.ts",
