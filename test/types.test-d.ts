@@ -8,6 +8,7 @@ import {
     number,
     object,
     of,
+    optional,
     Schema,
     string,
     tuple,
@@ -84,6 +85,30 @@ describe("inference", () => {
 
     it("infers the object shape from object()", () => {
         expectTypeOf(object({ a: string(), b: number() })).toEqualTypeOf<Schema<{ a: string; b: number }>>();
+    });
+
+    it("carries the `?` modifier for a property wrapped in optional()", () => {
+        // The modifier is the whole point: `bar?: number` is a different type from
+        // `bar: number | undefined`, and only the first one lets the key be absent.
+        expectTypeOf(object({ foo: string(), bar: optional(number()) })).toEqualTypeOf<
+            Schema<{ foo: string; bar?: number }>
+        >();
+        expectTypeOf(object({ bar: optional(number()) })).toEqualTypeOf<Schema<{ bar?: number }>>();
+    });
+
+    it("keeps the `?` modifier on a symbol key", () => {
+        const id: unique symbol = Symbol("id");
+
+        expectTypeOf(object({ [id]: optional(number()), name: string() })).toEqualTypeOf<
+            Schema<{ [id]?: number; name: string }>
+        >();
+    });
+
+    it("infers optional() on its own as a schema for T | undefined", () => {
+        // Outside object() the brand is inert, so an optional schema is usable anywhere
+        // a Schema<T | undefined> is.
+        expectTypeOf(optional(number())).toExtend<Schema<number | undefined>>();
+        expectTypeOf(array(optional(number()))).toEqualTypeOf<Schema<(number | undefined)[]>>();
     });
 
     it("infers a fixed-length tuple from tuple()", () => {
@@ -341,20 +366,81 @@ describe("Schema<T> annotation rejects a drifted nested schema", () => {
     });
 });
 
-describe("Schema<T> annotation rejects a schema for an optional property", () => {
+describe("optional() expresses an optional property", () => {
+    interface Foo {
+        foo: string;
+        bar?: number;
+    }
+
+    it("accepts the matching schema", () => {
+        const schema: Schema<Foo> = object({
+            foo: string(),
+            bar: optional(number()),
+        });
+
+        expectTypeOf(schema).toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(schema.as(unknownValue())).toEqualTypeOf<Foo>();
+    });
+
+    it("rejects a wrong type for the optional property", () => {
+        // @ts-expect-error `bar: optional(string())` does not match Foo["bar"]
+        const schema: Schema<Foo> = object({ foo: string(), bar: optional(string()) });
+
+        expectTypeOf(schema).toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(object({ foo: string(), bar: optional(string()) })).not.toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(object({ foo: string(), bar: optional(string()) })).not.toExtend<Schema<Foo>>();
+    });
+
+    it("rejects a missing required property next to an optional one", () => {
+        // @ts-expect-error the required `foo` property is missing from the schema
+        const schema: Schema<Foo> = object({ bar: optional(number()) });
+
+        expectTypeOf(schema).toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(object({ bar: optional(number()) })).not.toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(object({ bar: optional(number()) })).not.toExtend<Schema<Foo>>();
+    });
+
+    it("rejects a superfluous property next to an optional one", () => {
+        // Still the bivarianceHack case: `{ foo, bar?, extra }` is assignable to Foo, so
+        // only the contravariant parameter catches it.
+        // @ts-expect-error `extra` is not a property of Foo
+        const schema: Schema<Foo> = object({ foo: string(), bar: optional(number()), extra: number() });
+
+        expectTypeOf(schema).toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(
+            object({ foo: string(), bar: optional(number()), extra: number() }),
+        ).not.toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(
+            object({ foo: string(), bar: optional(number()), extra: number() }),
+        ).not.toExtend<Schema<Foo>>();
+    });
+
+    it("rejects optional() where the interface declares the property required", () => {
+        // The mirror image of the cases below: marking a REQUIRED property optional is
+        // drift too, and the `?` the schema infers is what makes it visible.
+        // @ts-expect-error `foo` is required in Foo, so optional(string()) is wrong for it
+        const schema: Schema<Foo> = object({ foo: optional(string()), bar: optional(number()) });
+
+        expectTypeOf(schema).toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(
+            object({ foo: optional(string()), bar: optional(number()) }),
+        ).not.toEqualTypeOf<Schema<Foo>>();
+        expectTypeOf(
+            object({ foo: optional(string()), bar: optional(number()) }),
+        ).not.toExtend<Schema<Foo>>();
+    });
+});
+
+describe("Schema<T> annotation still rejects the near misses for an optional property", () => {
     interface Draft {
         title?: string;
     }
 
-    it("rejects the closest schema that can be written for an optional property", () => {
-        // The compile-time half of "optional properties are not expressible"
-        // (object.test.ts covers the runtime half: the key must be PRESENT).
-        // An optional property is not the same as a required one that may be
-        // undefined, so TypeScript blames bivarianceHack - Draft is not
-        // assignable to { title: string | undefined }. If the mapped type inside
-        // object() were ever relaxed to a Partial-like form, the library would
-        // start claiming support for optional properties it cannot check, and
-        // this directive is what catches that.
+    it("rejects a required property that merely admits undefined", () => {
+        // optional(string()) is the way to write this; union(string(), of(undefined)) is
+        // NOT, and the difference is not cosmetic - the union demands the key at runtime.
+        // TypeScript blames bivarianceHack: Draft is not assignable to
+        // { title: string | undefined }.
         // @ts-expect-error TS2322: title is optional in Draft but required in the schema type
         const schema: Schema<Draft> = object({ title: union(string(), of(undefined)) });
 
@@ -374,14 +460,20 @@ describe("Schema<T> annotation rejects a schema for an optional property", () =>
         expectTypeOf(object({ title: of(undefined) })).not.toEqualTypeOf<Schema<Draft>>();
     });
 
-    it("accepts a schema that leaves the optional property out entirely", () => {
-        // Oddity, measured rather than assumed: this one DOES compile. `object({})`
-        // infers Schema<{}>, and `{}` is assignable to an all-optional interface in
-        // both variance directions, so the annotation is satisfied by a schema that
-        // never checks `title` at all. That is the only shape it accepts for Draft -
-        // and it means an annotated schema gives no guarantee whatsoever about an
-        // optional property. (For a REQUIRED property, object({}) is rejected; see
-        // "rejects a missing property" above.)
+    it("accepts the right schema for Draft", () => {
+        const schema: Schema<Draft> = object({ title: optional(string()) });
+
+        expectTypeOf(schema).toEqualTypeOf<Schema<Draft>>();
+        expectTypeOf(object({ title: optional(string()) })).toEqualTypeOf<Schema<Draft>>();
+    });
+
+    it("still accepts a schema that leaves the optional property out entirely", () => {
+        // Oddity, measured rather than assumed, and unchanged by optional(): this one DOES
+        // compile. `object({})` infers Schema<{}>, and `{}` is assignable to an all-optional
+        // interface in both variance directions, so the annotation is satisfied by a schema
+        // that never checks `title` at all. An annotated schema therefore still guarantees
+        // nothing about an optional property unless you write optional() for it.
+        // (For a REQUIRED property, object({}) is rejected; see "rejects a missing property".)
         const schema: Schema<Draft> = object({});
 
         expectTypeOf(schema).toEqualTypeOf<Schema<Draft>>();

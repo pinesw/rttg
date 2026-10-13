@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { array, boolean, instanceOf, number, object, of, string, union, type Schema } from "@pinesw/rttg";
+import { array, boolean, instanceOf, number, object, of, optional, string, union, type Schema } from "@pinesw/rttg";
 
 describe("object()", () => {
     describe("basics", () => {
@@ -315,11 +315,11 @@ describe("object()", () => {
         });
     });
 
-    describe("optional properties are not expressible", () => {
+    describe("a property that may be undefined still demands its key", () => {
         it("rejects a missing key even when the property schema is of(undefined)", () => {
-            // There is no optional-property support: the `key in value` check runs before
-            // the property schema, so a TypeScript type like `{ a?: string }` cannot be
-            // modelled. of(undefined) only matches a key that is PRESENT.
+            // of(undefined) only matches a key that is PRESENT: the own-property check runs
+            // before the property schema is consulted. A key that may be ABSENT is what
+            // optional() is for - see "optional() properties" below.
             expect(object({ a: of(undefined) }).validate({})).toBe(false);
         });
 
@@ -332,8 +332,9 @@ describe("object()", () => {
         });
 
         it("requires the key to be present for a union(string(), of(undefined)) property", () => {
-            // The closest you can get to `{ a?: string }` is `{ a: string | undefined }`,
-            // which still demands the key.
+            // `{ a: string | undefined }` is a REQUIRED property that may hold undefined,
+            // which is not the same thing as `{ a?: string }`: it still demands the key.
+            // optional(string()) is what models the latter.
             const schema = object({ a: union(string(), of(undefined)) });
 
             expect(schema.validate({ a: "x" })).toBe(true);
@@ -349,6 +350,127 @@ describe("object()", () => {
 
             expect(schema.validate(Object.create({ a: undefined }) as object)).toBe(false);
             expect(schema.validate({ a: undefined })).toBe(true);
+        });
+    });
+
+    describe("optional() properties", () => {
+        interface Foo {
+            foo: string;
+            bar?: number;
+        }
+
+        // No casts: the annotation really does accept this schema, and only this shape of it.
+        const fooSchema: Schema<Foo> = object({
+            foo: string(),
+            bar: optional(number()),
+        });
+
+        it("accepts a value whose optional key is absent", () => {
+            // The whole point: an absent key is valid, where every other schema would fail.
+            expect(fooSchema.validate({ foo: "x" })).toBe(true);
+        });
+
+        it("accepts a value whose optional key is present and valid", () => {
+            expect(fooSchema.validate({ foo: "x", bar: 1 })).toBe(true);
+        });
+
+        it("rejects a value whose optional key is present with the wrong type", () => {
+            // Optional means "may be absent", not "unchecked".
+            expect(fooSchema.validate({ foo: "x", bar: "1" })).toBe(false);
+            expect(fooSchema.validate({ foo: "x", bar: null })).toBe(false);
+        });
+
+        it("accepts a value whose optional key is present and undefined", () => {
+            // exactOptionalPropertyTypes is off in this project, so `{ foo: "x", bar: undefined }`
+            // IS a legal Foo. optional(number()) is a Schema<number | undefined>, and accepts it.
+            expect(fooSchema.validate({ foo: "x", bar: undefined })).toBe(true);
+        });
+
+        it("still requires the properties that are not optional", () => {
+            expect(fooSchema.validate({ bar: 1 })).toBe(false);
+            expect(fooSchema.validate({})).toBe(false);
+        });
+
+        it("accepts an empty object when every property is optional", () => {
+            const schema = object({ a: optional(string()), b: optional(number()) });
+
+            expect(schema.validate({})).toBe(true);
+            expect(schema.validate({ a: "x" })).toBe(true);
+            expect(schema.validate({ b: 1 })).toBe(true);
+            expect(schema.validate({ a: "x", b: 1 })).toBe(true);
+            expect(schema.validate({ a: 1 })).toBe(false);
+        });
+
+        it("validates an optional property whose schema is itself an object()", () => {
+            const schema = object({ nested: optional(object({ b: string() })) });
+
+            expect(schema.validate({})).toBe(true);
+            expect(schema.validate({ nested: undefined })).toBe(true);
+            expect(schema.validate({ nested: { b: "x" } })).toBe(true);
+            expect(schema.validate({ nested: { b: 1 } })).toBe(false);
+            // The inner schema keeps its own rules: `b` is required inside `nested`.
+            expect(schema.validate({ nested: {} })).toBe(false);
+        });
+
+        it("validates an optional property whose schema is itself an array()", () => {
+            const schema = object({ tags: optional(array(number())) });
+
+            expect(schema.validate({})).toBe(true);
+            expect(schema.validate({ tags: [] })).toBe(true);
+            expect(schema.validate({ tags: [1, 2] })).toBe(true);
+            expect(schema.validate({ tags: ["1"] })).toBe(false);
+            expect(schema.validate({ tags: null })).toBe(false);
+        });
+
+        it("treats an INHERITED key as absent rather than as a match", () => {
+            // Deliberate, and the only reading consistent with "own properties only":
+            // the prototype is not part of the data, so an inherited key is simply not
+            // there. It therefore satisfies the optional property - and, note, its value
+            // is never validated, because there is no own value to validate.
+            const fromPrototype = Object.create({ bar: 99 }) as object;
+            Object.assign(fromPrototype, { foo: "x" });
+
+            expect(Object.prototype.hasOwnProperty.call(fromPrototype, "bar")).toBe(false);
+            expect(fooSchema.validate(fromPrototype)).toBe(true);
+
+            // Even an inherited value of the WRONG type passes, for the same reason.
+            const badPrototype = Object.create({ bar: "not a number" }) as object;
+            Object.assign(badPrototype, { foo: "x" });
+
+            expect(fooSchema.validate(badPrototype)).toBe(true);
+
+            // An OWN key of the wrong type still fails, so the check is not simply skipped.
+            expect(fooSchema.validate({ foo: "x", bar: "not a number" })).toBe(false);
+        });
+
+        it("validates a symbol-keyed optional property", () => {
+            const id: unique symbol = Symbol("id");
+
+            interface MaybeTagged {
+                [id]?: number;
+                name: string;
+            }
+
+            const schema: Schema<MaybeTagged> = object({ [id]: optional(number()), name: string() });
+
+            expect(schema.validate({ name: "ada" })).toBe(true);
+            expect(schema.validate({ name: "ada", [id]: 1 })).toBe(true);
+            expect(schema.validate({ name: "ada", [id]: undefined })).toBe(true);
+            expect(schema.validate({ name: "ada", [id]: "1" })).toBe(false);
+            // The string-keyed property of the same schema is unaffected.
+            expect(schema.validate({ [id]: 1 })).toBe(false);
+        });
+
+        it("works through assertType() and as()", () => {
+            const value = fooSchema.as({ foo: "x" });
+
+            expect(value).toEqual({ foo: "x" });
+            expect(() => fooSchema.as({ foo: "x", bar: "1" })).toThrow(/^Object validation failed$/);
+            expect(() => fooSchema.assertType({ bar: 1 })).toThrow(/^Object validation failed$/);
+        });
+
+        it("leaves the extra-keys-are-ignored rule alone", () => {
+            expect(fooSchema.validate({ foo: "x", unrelated: true })).toBe(true);
         });
     });
 
@@ -457,6 +579,82 @@ describe("object()", () => {
 
             expect(outer.validate({ first: { n: 1 }, second: { n: 2 } })).toBe(true);
             expect(outer.validate({ first: { n: 1 }, second: { n: "2" } })).toBe(false);
+        });
+    });
+});
+
+describe("optional()", () => {
+    // optional() exists for object(), but it is a schema in its own right. Outside object()
+    // the brand means nothing and it behaves as the Schema<T | undefined> that it is.
+    describe("on its own", () => {
+        it("accepts undefined", () => {
+            expect(optional(number()).validate(undefined)).toBe(true);
+        });
+
+        it("accepts a value matching the wrapped schema", () => {
+            expect(optional(number()).validate(1)).toBe(true);
+            expect(optional(string()).validate("x")).toBe(true);
+        });
+
+        it("rejects a value matching neither", () => {
+            expect(optional(number()).validate("1")).toBe(false);
+            expect(optional(number()).validate(null)).toBe(false);
+            expect(optional(number()).validate({})).toBe(false);
+        });
+
+        it("does not accept null, which is not undefined", () => {
+            // of() compares with ===, and so does this: null is a different absence.
+            expect(optional(of(null)).validate(null)).toBe(true);
+            expect(optional(number()).validate(null)).toBe(false);
+        });
+
+        it("throws its own message through as() and assertType()", () => {
+            expect(optional(number()).as(1)).toBe(1);
+            expect(optional(number()).as(undefined)).toBe(undefined);
+            expect(() => optional(number()).as("x")).toThrow(/^Optional validation failed$/);
+            expect(() => optional(number()).assertType("x")).toThrow(/^Optional validation failed$/);
+        });
+
+        it("survives being detached from the schema", () => {
+            // fromOptions() closes over the validation function rather than reaching
+            // through `this`, and the spread in optional() must not undo that.
+            const { validate, as } = optional(number());
+
+            expect(validate(1)).toBe(true);
+            expect(validate("x")).toBe(false);
+            expect(as(undefined)).toBe(undefined);
+        });
+    });
+
+    describe("composed with the other factories", () => {
+        it("nests inside array()", () => {
+            expect(array(optional(number())).validate([1, undefined, 2])).toBe(true);
+            expect(array(optional(number())).validate([1, "2"])).toBe(false);
+        });
+
+        it("nests inside union()", () => {
+            const schema = union(optional(number()), string());
+
+            expect(schema.validate(undefined)).toBe(true);
+            expect(schema.validate(1)).toBe(true);
+            expect(schema.validate("x")).toBe(true);
+            expect(schema.validate(null)).toBe(false);
+        });
+
+        it("wraps another optional() without complaint", () => {
+            const schema = optional(optional(number()));
+
+            expect(schema.validate(undefined)).toBe(true);
+            expect(schema.validate(1)).toBe(true);
+            expect(schema.validate("x")).toBe(false);
+        });
+
+        it("keeps the brand, so it still marks a property optional after composition", () => {
+            // The brand lives on the schema object optional() returns. Wrapping it in
+            // another optional() keeps it; passing it through union() does not, and a
+            // union()-wrapped optional therefore demands its key again.
+            expect(object({ a: optional(optional(number())) }).validate({})).toBe(true);
+            expect(object({ a: union(optional(number()), string()) }).validate({})).toBe(false);
         });
     });
 });

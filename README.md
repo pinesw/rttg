@@ -87,6 +87,10 @@ The compiler has no opinion, because you never told it what the schema was *supp
 the annotation and all three ways a schema can drift become compile errors. Each error below is
 real `tsc --noEmit --strict` output, with the long file path trimmed.
 
+There is a fourth kind of drift once optional properties are involved — a property the type
+declares optional written as required, or the reverse. It is caught the same way; see
+[`optional()`](#optionaltschema-schemat-optionalschemat).
+
 ### Wrong property type
 
 ```ts
@@ -348,11 +352,12 @@ boolean().validate(0);     // false
 
 Error: `Expected boolean`.
 
-### `object<T extends {}>(schema: { [K in keyof T]: Schema<T[K]> }): Schema<T>`
+### `object(schema): Schema<T>`
 
 Matches a non-null object that has every listed key as an **own** property with a matching value.
 String and symbol keys are both checked. Keys you did not list are ignored at runtime — see
-[`object()` checks own properties only](#object-checks-own-properties-only).
+[`object()` checks own properties only](#object-checks-own-properties-only). A key whose schema
+comes from [`optional()`](#optionaltschema-schemat-optionalschemat) may be absent.
 
 ```ts
 const point = object({ x: number(), y: number() });
@@ -361,7 +366,60 @@ point.validate({ x: 1, y: 2, z: 3 }); // true  — extra keys ignored
 point.validate({ x: 1 });             // false
 ```
 
+It has two overloads. `RequiredSchema`, `SchemaRecord`, `ObjectType` and `Flatten` are internal
+aliases — you never name them — but the shape is worth knowing, because which overload applies
+decides what the result type looks like:
+
+```ts
+// RequiredSchema<T> is Schema<T> that is NOT the result of optional().
+function object<T extends {}>(schema: { [K in keyof T]: RequiredSchema<T[K]> }): Schema<T>;
+// ObjectType<S> reads the keys of S, giving the optional() ones a `?`.
+function object<S extends SchemaRecord>(schema: S): Schema<Flatten<ObjectType<S>>>;
+```
+
+The first applies when no key uses `optional()`. It names the validated type `T` directly, which
+is what lets a `Schema<T>` annotation supply a contextual type to each sub-schema — the reason a
+bare `of("circle")` keeps its literal type inside an annotated `object({ ... })`.
+
+The second takes over as soon as one key uses `optional()`, and reads the result off the argument
+instead; that is the only way the result can carry a `?` modifier. It supplies no contextual type
+of its own, so in an *un-annotated* schema a literal widens and needs `as const` — just as it
+already does outside `object()`. Both overloads are the same function at runtime.
+
 Error: `Object validation failed`.
+
+### `optional<T>(schema: Schema<T>): OptionalSchema<T>`
+
+Marks a property as optional inside `object()`: its key may be absent from the validated value.
+If the key *is* present, the wrapped schema still has to accept it — `undefined` included.
+
+```ts
+const schema = object({ a: string(), b: optional(number()) });
+schema.validate({ a: "x" });                 // true  — absent
+schema.validate({ a: "x", b: 1 });           // true
+schema.validate({ a: "x", b: undefined });   // true  — present and undefined
+schema.validate({ a: "x", b: "1" });         // false — present and wrong
+```
+
+An `OptionalSchema<T>` is a `Schema<T | undefined>` carrying a marker that `object()` reads, so
+outside `object()` it is an ordinary schema for `T | undefined` and composes like one:
+
+```ts
+optional(number()).validate(undefined); // true
+optional(number()).validate(1);         // true
+optional(number()).validate("1");       // false
+array(optional(number())).validate([1, undefined]); // true
+```
+
+The marker survives `optional(optional(x))` but not `union(optional(x), y)` — a union is a new
+schema, so a key written that way is required again.
+
+See [Optional properties need `optional()`](#optional-properties-need-optional-and-nothing-else-will-do)
+for what the annotation does and does not catch, and
+[A present `undefined` passes](#a-present-undefined-passes-an-optional-property) for the
+`exactOptionalPropertyTypes` caveat.
+
+Error: `Optional validation failed`.
 
 ### `array<T>(schema: Schema<T>): Schema<T[]>`
 
@@ -443,6 +501,41 @@ const profileSchema: Schema<Profile> = object({
     id: number(),
     nickname: union(string(), of(null)),
 });
+```
+
+### Optional properties
+
+Wrap the property schema in `optional()`. The key may then be absent; if it is there, it is still
+checked.
+
+```ts
+import { Schema, array, number, object, optional, string } from "@pinesw/rttg";
+
+interface Article {
+    title: string;
+    subtitle?: string;
+    tags?: string[];
+}
+
+const articleSchema: Schema<Article> = object({
+    title: string(),
+    subtitle: optional(string()),
+    tags: optional(array(string())),
+});
+
+articleSchema.validate({ title: "Roadworks" });                     // true
+articleSchema.validate({ title: "Roadworks", tags: ["traffic"] });  // true
+articleSchema.validate({ title: "Roadworks", tags: "traffic" });    // false
+```
+
+Nullable and optional are different, and combine the way you would expect — `subtitle?: string | null`
+is `optional(union(string(), of(null)))`.
+
+Note that `optional()` changes the *inferred* type as well, so it works without an annotation too:
+
+```ts
+const inferred = object({ title: string(), subtitle: optional(string()) });
+// => Schema<{ title: string; subtitle?: string }>
 ```
 
 ### Enums / literal unions
@@ -570,17 +663,29 @@ responses that grow new fields. Extra keys in the *schema* are caught at compile
 annotation — that is the division of labour: the runtime check is permissive, the compile-time
 check is exact.
 
-### Optional properties are not expressible
+### Optional properties need `optional()`, and nothing else will do
 
-`object()` requires the key to be **present**:
+`object()` requires every key you list to be **present** as an own property. `optional()` is the
+one way to lift that requirement for a key:
 
 ```ts
-object({ a: of(undefined) }).validate({});              // false — key missing
-object({ a: of(undefined) }).validate({ a: undefined }); // true  — key present
+interface Foo {
+    foo: string;
+    bar?: number;
+}
+
+const fooSchema: Schema<Foo> = object({
+    foo: string(),
+    bar: optional(number()),
+});
+
+fooSchema.validate({ foo: "x" });              // true  — absent is allowed
+fooSchema.validate({ foo: "x", bar: 1 });      // true
+fooSchema.validate({ foo: "x", bar: "1" });    // false — present, so it is checked
 ```
 
-So a type like `{ title?: string }` cannot be matched by any schema. The obvious attempt is
-rejected, because an optional property is not the same as a required one that may be `undefined`:
+What does not work is modelling the property as one that merely *admits* `undefined`. An optional
+property is not the same as a required property of type `T | undefined`, and the compiler says so:
 
 ```ts
 interface Draft { title?: string }
@@ -600,11 +705,50 @@ draft-schema.ts(7,7): error TS2322: Type 'Schema<{ title: string | undefined; }>
             Property 'title' is optional in type 'Draft' but required in type '{ title: string | undefined; }'.
 ```
 
-Model the field as required-and-nullable (`title: string | null`) where you can, or leave the key
-out of the schema and check it yourself. Leaving it out does satisfy the annotation —
-`const draftSchema: Schema<Draft> = object({})` compiles, because `{}` is assignable to an
-all-optional interface in both variance directions — which is worth knowing for what it implies:
-an annotated `Schema<Draft>` guarantees nothing at all about `title`.
+That rejection is doing you a favour: `union(string(), of(undefined))` would still demand the key
+at runtime. `object({ title: optional(string()) })` is what satisfies `Schema<Draft>`.
+
+One hole remains, and `optional()` does not close it. A schema that leaves the key out entirely
+still satisfies the annotation — `const draftSchema: Schema<Draft> = object({})` compiles, because
+`{}` is assignable to an all-optional interface in both variance directions. So an annotated
+`Schema<Draft>` still guarantees nothing about `title` unless you actually write `optional()` for
+it. What the annotation *does* catch, once the key is there, is using `optional()` where the type
+says required, or forgetting it where the type says optional.
+
+### A present `undefined` passes an `optional()` property
+
+```ts
+const schema = object({ bar: optional(number()) });
+
+schema.validate({});                 // true — key absent
+schema.validate({ bar: undefined }); // true — key present, holding undefined
+schema.validate({ bar: 1 });         // true
+```
+
+`optional(number())` is a `Schema<number | undefined>` carrying a marker that `object()` reads, so
+a present `undefined` is accepted as well as an absent key. That matches TypeScript's default:
+with `exactOptionalPropertyTypes` off, `{ bar: undefined }` *is* a legal `{ bar?: number }`.
+
+If you turn `exactOptionalPropertyTypes` on, your types start distinguishing the two and this
+schema becomes more permissive than the type it guards: `{ bar: undefined }` would no longer be a
+legal `{ bar?: number }`, but the schema still accepts it. The annotation keeps working — nothing
+breaks at compile time — so if that distinction matters to you, check for it yourself.
+
+### An inherited key counts as absent for `optional()`
+
+`object()` looks only at own properties, and that rule wins over the optional check:
+
+```ts
+const schema = object({ bar: optional(number()) });
+const value = Object.create({ bar: "not a number" }) as object;
+
+schema.validate(value); // true
+```
+
+The prototype is not part of the data, so an inherited `bar` is treated as not being there at all
+— which satisfies the optional property, and means the inherited value is never validated. For a
+required property the same rule makes the value fail outright; see
+[`object()` checks own properties only](#object-checks-own-properties-only).
 
 ### `object()` is loose about what counts as an object
 

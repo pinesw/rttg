@@ -136,20 +136,99 @@ export function boolean() {
 }
 
 /**
+ * Brands a schema as optional. Not exported: the brand is observable through `OptionalSchema`,
+ * and nothing outside this module needs to name it.
+ */
+const OPTIONAL: unique symbol = Symbol("rttg.optional");
+
+/**
+ * A schema that `object()` treats as an optional property: its key may be absent from the value.
+ * Everywhere else it behaves as the `Schema<T | undefined>` that it is.
+ */
+export interface OptionalSchema<T> extends Schema<T | undefined> {
+    readonly [OPTIONAL]: true;
+}
+
+/** The argument of `object()`: a record of schemas, keyed by string, number or symbol. */
+type SchemaRecord = Record<PropertyKey, Schema<any>>;
+
+/** The keys of a schema record that `optional()` produced. */
+type OptionalKeys<S> = { [K in keyof S]-?: S[K] extends OptionalSchema<any> ? K : never }[keyof S];
+
+/** The keys of a schema record that it did not. */
+type RequiredKeys<S> = { [K in keyof S]-?: S[K] extends OptionalSchema<any> ? never : K }[keyof S];
+
+/** The object type a record of schemas describes, with the `optional()` keys carrying a `?`. */
+type ObjectType<S> = {
+    [K in RequiredKeys<S>]: S[K] extends Schema<infer U> ? U : never;
+} & {
+    [K in OptionalKeys<S>]?: S[K] extends OptionalSchema<infer U> ? U : never;
+};
+
+/**
+ * Collapses the required and optional halves of `ObjectType` into a single object type.
+ * The trailing `& {}` is load-bearing: without it, a mismatch against a `Schema<T>` annotation is
+ * reported in terms of the unresolved alias rather than the object type the user wrote.
+ */
+type Flatten<T> = { [K in keyof T]: T[K] } & {};
+
+/** Whether `optional()` produced this schema. */
+function isOptional(schema: Schema<any>): boolean {
+    return (schema as { [OPTIONAL]?: unknown })[OPTIONAL] === true;
+}
+
+/**
+ * Creates a schema that marks a property as optional inside `object()`, so that its key may be
+ * absent from the validated value. On its own it validates the wrapped schema or `undefined`.
+ */
+export function optional<T>(schema: Schema<T>): OptionalSchema<T> {
+    return {
+        ...fromOptions({
+            validationFn: (value): value is T | undefined => value === undefined || schema.validate(value),
+            errorMessage: "Optional validation failed",
+        }),
+        [OPTIONAL]: true,
+    };
+}
+
+/**
+ * A schema that `optional()` did not produce.
+ * The brand is declared absent rather than simply left out, so that an `OptionalSchema` fails to
+ * match: that is what makes a schema containing `optional()` fall through to the second overload
+ * of `object()` below.
+ */
+type RequiredSchema<T> = Schema<T> & { readonly [OPTIONAL]?: undefined };
+
+/**
  * Creates a schema that validates if a value is an object matching the keys and schemas defined in the input.
+ * A key whose schema comes from `optional()` may be absent; every other key must be present.
  * Extra keys in the object that are not defined in the schema are ignored.
  */
-export function object<T extends {}>(schema: { [K in keyof T]: Schema<T[K]> }) {
+// Overload 1, every key required. `T` is the validated type itself, so a `Schema<T>` annotation
+// still supplies a contextual type to each sub-schema and a bare `of("circle")` keeps its literal type.
+export function object<T extends {}>(schema: { [K in keyof T]: RequiredSchema<T[K]> }): Schema<T>;
+// Overload 2, reached as soon as one key uses `optional()`. The result is read off the argument,
+// which is the only way it can carry a `?` modifier - at the cost of the contextual type above.
+export function object<S extends SchemaRecord>(schema: S): Schema<Flatten<ObjectType<S>>>;
+export function object(schema: SchemaRecord): Schema<any> {
     return fromOptions({
-        validationFn(value): value is T {
+        validationFn(value): value is unknown {
             if (typeof value !== "object" || value === null) {
                 return false;
             }
             const record = value as Record<PropertyKey, unknown>;
             // Reflect.ownKeys rather than for-in: for-in never enumerates symbol keys, so every symbol-keyed sub-schema would be skipped silently.
-            for (const key of Reflect.ownKeys(schema) as (keyof T)[]) {
+            for (const key of Reflect.ownKeys(schema)) {
+                const propertySchema = schema[key];
                 // An own-property check rather than `in`, which walks the prototype chain: inherited data must not satisfy a schema.
-                if (!Object.prototype.hasOwnProperty.call(value, key) || !schema[key].validate(record[key])) {
+                if (!Object.prototype.hasOwnProperty.call(value, key)) {
+                    // Only optional() lets a key be absent. An inherited key counts as absent, and is left unvalidated.
+                    if (isOptional(propertySchema)) {
+                        continue;
+                    }
+                    return false;
+                }
+                if (!propertySchema.validate(record[key])) {
                     return false;
                 }
             }
