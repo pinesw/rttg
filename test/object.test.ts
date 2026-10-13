@@ -140,13 +140,16 @@ describe("object()", () => {
         });
     });
 
-    describe("inherited properties satisfy the check, because `in` walks the prototype chain", () => {
-        it("accepts an object whose property lives on its prototype", () => {
-            // object() uses `key in value`, not Object.hasOwn, so inherited data counts.
+    describe("only own properties count: `in` would walk the prototype chain", () => {
+        it("rejects an object whose property lives on its prototype", () => {
+            // object() uses Object.prototype.hasOwnProperty.call, not `key in value`,
+            // so inherited data does not satisfy a schema.
             const inherited = Object.create({ a: 1 }) as object;
 
-            expect(object({ a: number() }).validate(inherited)).toBe(true);
+            expect(object({ a: number() }).validate(inherited)).toBe(false);
             expect(Object.getOwnPropertyNames(inherited)).toHaveLength(0);
+            // The same data as an own property passes.
+            expect(object({ a: number() }).validate({ a: 1 })).toBe(true);
         });
 
         it("rejects an object whose inherited property has the wrong type", () => {
@@ -155,7 +158,7 @@ describe("object()", () => {
             expect(object({ a: number() }).validate(inherited)).toBe(false);
         });
 
-        it("accepts a class instance whose properties are prototype getters only", () => {
+        it("rejects a class instance whose properties are prototype getters only", () => {
             class PrototypeGetters {
                 get x(): number {
                     return 1;
@@ -168,28 +171,41 @@ describe("object()", () => {
 
             const instance = new PrototypeGetters();
 
-            // The instance has no own properties at all - both values come from accessors
-            // defined on the prototype - and object() still accepts it.
+            // The instance has no own properties at all - both values come from
+            // accessors defined on the prototype - so object() rejects it. This is
+            // where the own-property rule is a real trade-off: a class exposing its
+            // data through prototype accessors no longer validates, and has to be
+            // converted to a plain object first.
             expect(Object.getOwnPropertyNames(instance)).toHaveLength(0);
-            expect(object({ x: number(), y: number() }).validate(instance)).toBe(true);
+            expect(object({ x: number(), y: number() }).validate(instance)).toBe(false);
         });
 
-        it("accepts a plain {} for a schema requiring Object.prototype members", () => {
-            // Sharp edge: every object inherits "toString" and "constructor" from
-            // Object.prototype, so a schema asking for them is satisfied by {}.
-            expect(object({ toString: instanceOf(Function) }).validate({})).toBe(true);
-            expect(object({ constructor: instanceOf(Function) }).validate({})).toBe(true);
+        it("accepts a class instance whose properties are set on the instance", () => {
+            // The ordinary case, and the one worth protecting: data assigned in the
+            // constructor is an own property and validates normally.
+            class OwnFields {
+                public readonly x = 1;
+                public readonly y = 2;
+            }
+
+            expect(object({ x: number(), y: number() }).validate(new OwnFields())).toBe(true);
         });
 
-        it("rejects {} when an inherited Object.prototype member has the wrong type", () => {
-            // {}.toString exists (inherited) but is a function, not a string.
+        it("rejects a plain {} for a schema requiring Object.prototype members", () => {
+            // Every object inherits "toString" and "constructor" from
+            // Object.prototype, but neither is an own property of {}.
+            expect(object({ toString: instanceOf(Function) }).validate({})).toBe(false);
+            expect(object({ constructor: instanceOf(Function) }).validate({})).toBe(false);
+        });
+
+        it("accepts an Object.prototype member shadowed by an own property", () => {
             expect(object({ toString: string() }).validate({})).toBe(false);
             // Shadowing it with a string own property makes the very same schema pass.
             expect(object({ toString: string() }).validate({ toString: "shadowed" })).toBe(true);
         });
 
         it("accepts new String(\"ab\") for object({ length: number() })", () => {
-            // A boxed string is typeof "object" and carries a numeric own "length",
+            // A boxed string is typeof "object" and carries a numeric OWN "length",
             // while the primitive string it wraps is rejected.
             expect(object({ length: number() }).validate(new String("ab"))).toBe(true);
             expect(object({ length: number() }).validate("ab")).toBe(false);
@@ -209,19 +225,18 @@ describe("object()", () => {
         });
 
         it("rejects a prototype-less object for a schema requiring Object.prototype members", () => {
-            // The mirror image of the {} case above: with no prototype there is nothing
-            // to inherit, so "toString" is simply absent.
+            // The same answer as the {} case above, for a second reason: with no
+            // prototype there is nothing to inherit, so "toString" is simply absent.
             expect(object({ toString: instanceOf(Function) }).validate(Object.create(null))).toBe(false);
         });
     });
 
-    describe("symbol-keyed properties are never validated", () => {
-        // BUG, and the same class of unsoundness as the sparse-array one: object()
-        // walks its schema with `for (const key in schema)`, which never enumerates
-        // symbol keys, so every symbol-keyed sub-schema is skipped entirely. The
-        // compile-time half of the library accepts such a schema happily, so a
-        // caller ends up with a value statically typed `Tagged` whose symbol
-        // property may be absent - or hold anything at all - at runtime.
+    describe("symbol-keyed properties are validated", () => {
+        // object() walks its schema with Reflect.ownKeys, not `for (const key in
+        // schema)`: for-in never enumerates symbol keys, so symbol-keyed
+        // sub-schemas used to be skipped entirely, and a value statically typed
+        // `Tagged` could be missing its symbol property - or hold anything at all
+        // there - at runtime.
         const id: unique symbol = Symbol("id");
 
         interface Tagged {
@@ -232,14 +247,18 @@ describe("object()", () => {
         // No casts anywhere: the annotation really does accept this schema.
         const tagged: Schema<Tagged> = object({ [id]: number(), name: string() });
 
-        it("accepts a value that is missing the symbol-keyed property entirely", () => {
-            expect(tagged.validate({ name: "ada" })).toBe(true);
+        it("accepts a value that carries the symbol-keyed property", () => {
+            expect(tagged.validate({ name: "ada", [id]: 1 })).toBe(true);
         });
 
-        it("accepts a value whose symbol-keyed property has the wrong type", () => {
-            // The sub-schema is never consulted in either direction.
-            expect(tagged.validate({ name: "ada", [id]: "not a number" })).toBe(true);
-            expect(tagged.validate({ name: "ada", [id]: null })).toBe(true);
+        it("rejects a value that is missing the symbol-keyed property entirely", () => {
+            expect(tagged.validate({ name: "ada" })).toBe(false);
+        });
+
+        it("rejects a value whose symbol-keyed property has the wrong type", () => {
+            // The sub-schema is consulted in both directions.
+            expect(tagged.validate({ name: "ada", [id]: "not a number" })).toBe(false);
+            expect(tagged.validate({ name: "ada", [id]: null })).toBe(false);
         });
 
         it("still validates the string-keyed properties of the same schema", () => {
@@ -247,31 +266,52 @@ describe("object()", () => {
             expect(tagged.validate({ [id]: 1 })).toBe(false);
         });
 
-        it("as() hands back a value typed Tagged whose symbol property is missing", () => {
-            const value = tagged.as({ name: "ada" });
+        it("as() hands back a value whose symbol property really is there", () => {
+            const value = tagged.as({ name: "ada", [id]: 7 });
 
             expect(value.name).toBe("ada");
-            expect(value[id]).toBeUndefined();
-            expect(id in value).toBe(false);
+            expect(value[id]).toBe(7);
+            expect(id in value).toBe(true);
         });
 
-        it("makes a schema with only symbol keys accept any non-null object", () => {
+        it("as() refuses a value that is missing the symbol property", () => {
+            expect(() => tagged.as({ name: "ada" })).toThrow(/^Object validation failed$/);
+        });
+
+        it("makes a schema with only symbol keys reject objects that lack the key", () => {
             const schema = object({ [id]: number() });
 
-            expect(schema.validate({})).toBe(true);
-            expect(schema.validate([])).toBe(true);
-            // Only the typeof/null guard is left to do any work at all.
+            expect(schema.validate({})).toBe(false);
+            expect(schema.validate([])).toBe(false);
             expect(schema.validate(null)).toBe(false);
             expect(schema.validate("ab")).toBe(false);
+            expect(schema.validate({ [id]: 1 })).toBe(true);
         });
 
-        it("skips well-known symbol keys too", () => {
+        it("validates well-known symbol keys too", () => {
             // Not limited to `unique symbol` declarations: Symbol.iterator is a key
-            // that plenty of real types use, and it is just as invisible to for-in.
+            // plenty of real types use, and it was just as invisible to for-in.
             const schema = object({ [Symbol.iterator]: instanceOf(Function) });
 
-            expect(schema.validate({})).toBe(true);
-            expect(schema.validate([])).toBe(true);
+            expect(schema.validate({})).toBe(false);
+            // An array carries Symbol.iterator on Array.prototype rather than as an
+            // own property, so the own-property rule rejects it.
+            expect(schema.validate([])).toBe(false);
+            expect(schema.validate({ [Symbol.iterator]: (): void => {} })).toBe(true);
+        });
+
+        it("requires a symbol key to be an own property, just like a string key", () => {
+            expect(object({ [id]: number() }).validate(Object.create({ [id]: 1 }) as object)).toBe(false);
+        });
+
+        it("validates a mix of string and symbol keys in one schema", () => {
+            const other: unique symbol = Symbol("other");
+            const schema = object({ a: number(), [id]: string(), [other]: boolean() });
+
+            expect(schema.validate({ a: 1, [id]: "x", [other]: true })).toBe(true);
+            expect(schema.validate({ a: 1, [id]: "x", [other]: "no" })).toBe(false);
+            expect(schema.validate({ a: 1, [id]: "x" })).toBe(false);
+            expect(schema.validate({ [id]: "x", [other]: true })).toBe(false);
         });
     });
 
@@ -302,12 +342,13 @@ describe("object()", () => {
             expect(schema.validate({ a: 1 })).toBe(false);
         });
 
-        it("accepts an inherited undefined for a union(string(), of(undefined)) property", () => {
-            // Because `in` walks the prototype chain, inheriting the key is enough -
-            // the property does not have to be an own property set to undefined.
+        it("rejects an inherited undefined for a union(string(), of(undefined)) property", () => {
+            // The key has to be an OWN property set to undefined; inheriting it is
+            // not enough, because object() does not walk the prototype chain.
             const schema = object({ a: union(string(), of(undefined)) });
 
-            expect(schema.validate(Object.create({ a: undefined }) as object)).toBe(true);
+            expect(schema.validate(Object.create({ a: undefined }) as object)).toBe(false);
+            expect(schema.validate({ a: undefined })).toBe(true);
         });
     });
 

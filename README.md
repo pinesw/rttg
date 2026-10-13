@@ -281,6 +281,10 @@ Use it as an annotation (`const s: Schema<Comment> = ...`) and as a parameter ty
 functions that take schemas. `bivarianceHack` is explained
 [above](#why-the-third-case-needs-bivariancehack); ignore it otherwise.
 
+All three methods are closures over the schema's own validation function rather than `this`, so
+they can be destructured or passed as bare callbacks: `const { as } = string(); values.map(as)`
+works.
+
 ### `of<T>(value: T): Schema<T>`
 
 Matches one specific value, compared with `===`.
@@ -290,8 +294,15 @@ of(42).validate(42);   // true
 of(42).validate("42"); // false
 ```
 
-Error: `Expected <value>`, built by interpolating the value — so `of(1).as(2)` throws
-`Expected 1`.
+Error: `Expected <value>`, built from the value — so `of(1).as(2)` throws `Expected 1`. The
+message is only built when a mismatch actually throws, so any value can be used as a target,
+including symbols and objects that cannot be stringified:
+
+```ts
+const id = Symbol("id");
+of(id).validate(id);  // true
+of(id).as(1);         // throws: Expected Symbol(id)
+```
 
 ### `instanceOf<T>(constructor: new (...args: any[]) => T): Schema<T>`
 
@@ -339,9 +350,9 @@ Error: `Expected boolean`.
 
 ### `object<T extends {}>(schema: { [K in keyof T]: Schema<T[K]> }): Schema<T>`
 
-Matches a non-null object that has every listed **string** key (checked with `in`) with a matching
-value. Keys you did not list are ignored at runtime, and symbol keys *in the schema* are never
-checked at all — see [`object()` never checks symbol keys](#object-never-checks-symbol-keys--bug).
+Matches a non-null object that has every listed key as an **own** property with a matching value.
+String and symbol keys are both checked. Keys you did not list are ignored at runtime — see
+[`object()` checks own properties only](#object-checks-own-properties-only).
 
 ```ts
 const point = object({ x: number(), y: number() });
@@ -354,7 +365,8 @@ Error: `Object validation failed`.
 
 ### `array<T>(schema: Schema<T>): Schema<T[]>`
 
-`Array.isArray(value)` and every element matches.
+`Array.isArray(value)` and every element matches, holes included — see
+[Holes in a sparse array](#holes-in-a-sparse-array-are-validated-as-undefined).
 
 ```ts
 array(number()).validate([1, 2, 3]); // true
@@ -525,8 +537,8 @@ The same shape works for `await response.json()`, `localStorage.getItem` and mes
 
 ## Behaviour worth knowing
 
-The library is small and deliberately literal about what it checks. Some of the consequences
-below are design choices; a few are bugs. Both are listed, and labelled.
+The library is small and deliberately literal about what it checks. The consequences below are
+design choices, but several of them are sharp enough to be worth knowing before you rely on them.
 
 ### Errors say what failed, not where
 
@@ -596,17 +608,15 @@ an annotated `Schema<Draft>` guarantees nothing at all about `title`.
 
 ### `object()` is loose about what counts as an object
 
-It tests `typeof value === "object" && value !== null`, then uses the `in` operator. Three
-consequences:
+It tests `typeof value === "object" && value !== null`, and nothing more. Two consequences:
 
 ```ts
-object({}).validate([]);                                   // true — arrays are typeof "object"
-object({ a: number() }).validate(Object.create({ a: 1 })); // true — `in` sees inherited properties
-object({ length: number() }).validate(new String("ab"));   // true — a boxed String has a length
+object({}).validate([]);                                 // true — arrays are typeof "object"
+object({ length: number() }).validate(new String("ab")); // true — a boxed String has a length
 ```
 
-If you need to exclude arrays or prototype-provided properties, add your own check; the library
-will not do it for you.
+If you need to exclude arrays or boxed primitives, add your own check; the library will not do it
+for you.
 
 There is one way it is *stricter* than JavaScript, though: a function fails, because `typeof` a
 function is `"function"` rather than `"object"`.
@@ -618,12 +628,11 @@ object({}).validate(() => {}); // false — even though a function is an object 
 A function carrying the required properties cannot satisfy an `object()` schema either. Arguably
 a bug; current behaviour either way.
 
-### `object()` never checks symbol keys — bug
+### `object()` checks own properties only
 
-`object()` walks its schema with `for (const key in schema)`, and `for...in` never enumerates
-symbol keys. Every symbol-keyed sub-schema is therefore skipped, in both directions: a value
-missing the property passes, and so does one whose property holds the wrong type. The annotation
-accepts such a schema happily, so nothing warns you.
+A key must be an **own** property of the value. `object()` walks the schema with `Reflect.ownKeys`
+and checks each key with `Object.prototype.hasOwnProperty`, so both string and symbol keys are
+validated, and inherited data does not count:
 
 ```ts
 const id: unique symbol = Symbol("id");
@@ -633,17 +642,34 @@ interface Tagged {
     name: string;
 }
 
-const tagged: Schema<Tagged> = object({ [id]: number(), name: string() }); // compiles
+const tagged: Schema<Tagged> = object({ [id]: number(), name: string() });
 
-tagged.validate({ name: "ada" });                       // true  (!) — property absent
-tagged.validate({ name: "ada", [id]: "not a number" }); // true  (!) — property unchecked
-tagged.as({ name: "ada" })[id];                         // undefined, though typed number
+tagged.validate({ name: "ada", [id]: 1 });              // true
+tagged.validate({ name: "ada" });                       // false — property absent
+tagged.validate({ name: "ada", [id]: "not a number" }); // false — property wrong type
 ```
 
-A schema whose keys are *all* symbols checks nothing beyond "is a non-null object". This is the
-same unsoundness as the sparse-array bug below — the caller gets a value statically typed
-`Tagged` whose property does not exist at runtime — so check symbol-keyed properties yourself, or
-key the type by string.
+```ts
+object({ a: number() }).validate(Object.create({ a: 1 })); // false — inherited, not own
+object({ a: number() }).validate({ a: 1 });                // true
+```
+
+Own-property checking is the safer default for validating data that came from outside the program,
+where an inherited `toString` or a polluted prototype should not be able to satisfy a schema. It
+has one cost worth weighing: a **class instance that exposes its data through prototype getters no
+longer validates**, because such an instance has no own properties at all.
+
+```ts
+class Point {
+    get x(): number { return 1; }
+}
+
+object({ x: number() }).validate(new Point()); // false — `x` lives on Point.prototype
+```
+
+Data assigned in the constructor is an own property and validates normally, so this only bites
+accessor-backed classes. Convert such an instance to a plain object before validating it, or check
+those properties yourself.
 
 ### `number()` accepts `NaN` and `Infinity`
 
@@ -672,54 +698,25 @@ of(NaN).validate(NaN);        // false — NaN !== NaN
 
 For objects, reach for `object()` or `instanceOf()` instead of `of()`.
 
-### Sparse arrays pass `array()` and `tuple()` vacuously — bug
+### Holes in a sparse array are validated as `undefined`
 
-`Array.prototype.every` skips holes, so an array of nothing but holes satisfies any element
-schema:
-
-```ts
-array(number()).validate(new Array(3));           // true  (!)
-tuple(string(), string()).validate(new Array(2)); // true  (!)
-```
-
-This is a genuine bug: nothing was checked. A *present* `undefined` is handled correctly, which
-shows the hole is the problem rather than the value:
+`array()` and `tuple()` walk indices `0..length-1` rather than using `Array.prototype.every`, which
+skips holes. Reading a hole yields `undefined`, so a hole is checked exactly as a present
+`undefined` is:
 
 ```ts
-array(number()).validate([undefined]); // false
+array(number()).validate(new Array(3));           // false — three holes, three undefineds
+array(number()).validate([undefined]);            // false — same reason
+tuple(string(), string()).validate(new Array(2)); // false
 ```
 
-### `of()` throws when the schema is constructed, for anything it cannot stringify — bug
-
-The error message is built eagerly by string interpolation (`Expected ${value}`), so the throw
-happens when the *schema* is created, long before any value is validated:
+A schema that admits `undefined` accepts holes, which is the other half of the same rule:
 
 ```ts
-of(Symbol("x"));         // throws: Cannot convert a Symbol value to a string
-of(Object.create(null)); // throws: Cannot convert object to primitive value
-of({ toString() { throw new Error("boom"); } }); // throws: boom
+array(union(number(), of(undefined))).validate([1, , 3]); // true
 ```
 
-A symbol is the familiar instance, but the real trigger is any value whose string conversion
-throws — a prototype-less object has no inherited `toString` to call, and a throwing `toString`
-propagates straight out of the `of()` call. Because it happens at construction time, such a
-schema at module scope takes the whole module down on import.
-
-`of()` simply cannot be used for those values; compare them yourself instead. Values that do
-stringify are fine, including ones you might expect to trip it: `of(1n)` builds, and
-`of(1n).as(2n)` throws `Expected 1`.
-
-### Methods must be called on the schema, not destructured — bug
-
-`assertType` and `as` call `this.validate`, so they lose their receiver when detached:
-
-```ts
-const { assertType } = string();
-assertType("ok"); // throws: Cannot read properties of undefined (reading 'validate')
-```
-
-`validate` itself survives destructuring (it is a plain closure), but the other two do not. Call
-them as methods, or use the standalone `assertType(value, schema)`.
+Note that `length` is still what drives the loop, so a hole counts towards a tuple's arity.
 
 ### Degenerate `union()` and `intersection()`
 

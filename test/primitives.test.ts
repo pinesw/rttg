@@ -266,33 +266,54 @@ describe("of()", () => {
         expect(Object.is(0, -0)).toBe(false);
     });
 
-    it("throws at schema-construction time for symbols", () => {
-        // BUG: `of` builds its error message eagerly with string interpolation
-        // (`Expected ${value}`), and a symbol cannot be implicitly stringified.
-        // The schema therefore can never be created, even though === would work
-        // perfectly well on symbols at validation time.
-        expect(() => of(Symbol("x"))).toThrow();
-        expect(() => of(Symbol("x"))).toThrow(TypeError);
-        expect(() => of(Symbol.iterator)).toThrow(/Cannot convert a Symbol value to a string/);
+    it("builds a schema for symbols, and validates them by identity", () => {
+        // `of` builds its error message lazily, so a symbol - which cannot be
+        // implicitly stringified - no longer takes the of() call down with it.
+        const x = Symbol("x");
+
+        expect(() => of(x)).not.toThrow();
+        expect(of(x).validate(x)).toBe(true);
+        expect(of(x).validate(Symbol("x"))).toBe(false);
+        expect(of(Symbol.iterator).validate(Symbol.iterator)).toBe(true);
     });
 
-    it("throws at schema-construction time for any value it cannot stringify", () => {
-        // The symbol case above is only the most familiar instance of this bug.
-        // The real trigger is `Expected ${value}` being evaluated eagerly, so ANY
-        // value whose string conversion throws takes the of() call down with it -
-        // including a prototype-less object, which is an ordinary thing to hold in
-        // a map, and anything with a throwing toString.
-        const bare = Object.create(null) as object;
+    it("renders a symbol in its error message instead of throwing a TypeError", () => {
+        expect(() => of(Symbol("x")).as(1)).toThrow(/^Expected Symbol\(x\)$/);
+        expect(() => of(Symbol.iterator).as(1)).toThrow(/^Expected Symbol\(Symbol.iterator\)$/);
+    });
 
-        expect(() => of(bare)).toThrow(TypeError);
-        expect(() => of(bare)).toThrow(/Cannot convert object to primitive value/);
-        expect(() =>
-            of({
-                toString(): string {
-                    throw new Error("boom");
-                },
-            }),
-        ).toThrow("boom");
+    it("builds a schema for any value, including ones it cannot stringify", () => {
+        // The symbol case above is only the most familiar instance. The message is
+        // built on demand, so a value whose string conversion throws - a
+        // prototype-less object, or anything with a throwing toString - no longer
+        // breaks schema construction.
+        const bare = Object.create(null) as object;
+        const throwing = {
+            toString(): string {
+                throw new Error("boom");
+            },
+        };
+
+        expect(() => of(bare)).not.toThrow();
+        expect(() => of(throwing)).not.toThrow();
+        expect(of(bare).validate(bare)).toBe(true);
+        expect(of(bare).validate(Object.create(null))).toBe(false);
+        expect(of(throwing).validate(throwing)).toBe(true);
+    });
+
+    it("falls back to a safe rendering when the value cannot be stringified", () => {
+        // Nothing is allowed to escape from building the message either: a
+        // throwing toString must not replace the validation error with "boom".
+        const bare = Object.create(null) as object;
+        const throwing = {
+            toString(): string {
+                throw new Error("boom");
+            },
+        };
+
+        expect(() => of(bare).as(1)).toThrow(/^Expected \[object Object\]$/);
+        expect(() => of(throwing).as(1)).toThrow(/^Expected \[object Object\]$/);
+        expect(() => of(throwing).as(1)).not.toThrow(/boom/);
     });
 
     it("builds the schema fine for values that stringify without throwing", () => {

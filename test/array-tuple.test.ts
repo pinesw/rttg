@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { array, boolean, number, object, string, tuple } from "@pinesw/rttg";
+import { array, boolean, number, object, of, string, tuple, union } from "@pinesw/rttg";
 
 describe("array()", () => {
     describe("empty arrays", () => {
@@ -238,71 +238,83 @@ describe("tuple()", () => {
 });
 
 /**
- * KNOWN DEFECT - recorded here as current behaviour, NOT as endorsed behaviour.
+ * Holes in a sparse array are validated, not skipped.
  *
- * Both array() and tuple() check their elements with `value.every(...)`, and
- * Array.prototype.every SKIPS HOLES in sparse arrays. The callback is therefore
- * never invoked for a missing index, `every` returns true vacuously, and the
- * schema reports success. The caller is then handed a value statically typed
- * `number[]` (or `[string, string]`) whose elements are `undefined` at runtime -
- * exactly the unsoundness this library exists to prevent.
+ * Both array() and tuple() walk indices 0..length-1 rather than checking with
+ * `value.every(...)`: Array.prototype.every SKIPS HOLES, so the element schema
+ * was never consulted for a missing index and the whole array passed vacuously.
  *
- * A fix would walk indices 0..length-1 instead of using `every`. Until then
- * these assertions pin the buggy behaviour, so a fix shows up as a test failure
- * here rather than silently.
+ * Reading a hole yields `undefined`, so a hole is now validated exactly as a
+ * present `undefined` is - it satisfies a schema that admits undefined, and
+ * fails one that does not.
  */
-describe("KNOWN DEFECT: sparse arrays pass vacuously (every() skips holes)", () => {
-    it("array(): new Array(3) passes although it holds no numbers at all", () => {
-        expect(array(number()).validate(new Array(3))).toBe(true);
+describe("sparse arrays are validated hole by hole", () => {
+    it("array(): new Array(3) fails a number schema, because its holes read as undefined", () => {
+        expect(array(number()).validate(new Array(3))).toBe(false);
     });
 
-    it("array(): a sparse literal with holes between real elements passes", () => {
-        // `[1, , 3]` has length 3 with a hole at index 1; the hole is skipped.
-        expect(array(number()).validate([1, , 3])).toBe(true);
+    it("array(): a sparse literal with holes between real elements fails", () => {
+        // `[1, , 3]` has length 3 with a hole at index 1, and the hole is checked.
+        expect(array(number()).validate([1, , 3])).toBe(false);
+        // The same literal without the hole passes, so it really is the hole
+        // doing the rejecting and not the length.
+        expect(array(number()).validate([1, 2, 3])).toBe(true);
     });
 
-    it("array(): deleting an element of an otherwise valid array keeps it valid", () => {
+    it("array(): deleting an element of an otherwise valid array makes it invalid", () => {
         const values: (number | undefined)[] = [1, 2, 3];
         expect(array(number()).validate(values)).toBe(true);
         delete values[1];
-        // The delete turned index 1 into a hole, so validation still passes.
+        // The delete turned index 1 into a hole, so validation now fails.
         expect(values.length).toBe(3);
-        expect(array(number()).validate(values)).toBe(true);
+        expect(array(number()).validate(values)).toBe(false);
     });
 
-    it("tuple(): new Array(2) passes a two-string tuple", () => {
-        expect(tuple(string(), string()).validate(new Array(2))).toBe(true);
+    it("tuple(): new Array(2) fails a two-string tuple", () => {
+        expect(tuple(string(), string()).validate(new Array(2))).toBe(false);
     });
 
-    it("tuple(): a hole inside an otherwise valid tuple keeps it valid", () => {
+    it("tuple(): a hole inside an otherwise valid tuple makes it invalid", () => {
         const values: (string | undefined)[] = ["a", "b"];
         delete values[0];
-        expect(tuple(string(), string()).validate(values)).toBe(true);
+        expect(tuple(string(), string()).validate(values)).toBe(false);
+        // Without the delete the very same tuple passes.
+        expect(tuple(string(), string()).validate(["a", "b"])).toBe(true);
     });
 
-    it("as() hands back a value whose static type lies about its contents", () => {
-        // Statically `number[]`; at runtime every element is a hole.
-        const numbers = array(number()).as(new Array(2));
-        expect(numbers.length).toBe(2);
-        expect(numbers[0]).toBeUndefined();
-        expect(typeof numbers[0]).toBe("undefined");
+    it("as() refuses a sparse array instead of handing back a lying static type", () => {
+        expect(() => array(number()).as(new Array(2))).toThrow(/^Array validation failed$/);
+        expect(() => tuple(string(), string()).as(new Array(2))).toThrow(/^Tuple validation failed$/);
     });
 
-    describe("contrast: a present undefined is correctly rejected", () => {
-        it("array(): [undefined] fails where a hole would pass", () => {
+    describe("a hole is treated as undefined, exactly like a present undefined", () => {
+        it("array(): a hole and a present undefined are both rejected by number()", () => {
             expect(array(number()).validate([undefined])).toBe(false);
-            expect(array(number()).validate(new Array(1))).toBe(true);
+            expect(array(number()).validate(new Array(1))).toBe(false);
         });
 
-        it("array(): Array.from({ length: 3 }) fails because it is dense", () => {
-            // Array.from fills the holes with real undefined values.
+        it("array(): Array.from({ length: 3 }) is dense and fails for the same reason", () => {
+            // Array.from fills the holes with real undefined values. Either way
+            // the elements are undefined, and either way the schema rejects them.
             expect(array(number()).validate(Array.from({ length: 3 }))).toBe(false);
-            expect(array(number()).validate(new Array(3))).toBe(true);
+            expect(array(number()).validate(new Array(3))).toBe(false);
         });
 
-        it("tuple(): [undefined, undefined] fails where new Array(2) passes", () => {
+        it("tuple(): [undefined, undefined] and new Array(2) are both rejected", () => {
             expect(tuple(string(), string()).validate([undefined, undefined])).toBe(false);
-            expect(tuple(string(), string()).validate(new Array(2))).toBe(true);
+            expect(tuple(string(), string()).validate(new Array(2))).toBe(false);
+        });
+
+        it("array(): a schema that admits undefined accepts holes", () => {
+            // The positive half of the rule: holes are not rejected on sight,
+            // they are checked against the element schema like any other value.
+            expect(array(of(undefined)).validate(new Array(3))).toBe(true);
+            expect(array(union(number(), of(undefined))).validate([1, , 3])).toBe(true);
+        });
+
+        it("tuple(): a schema that admits undefined accepts holes", () => {
+            expect(tuple(of(undefined), of(undefined)).validate(new Array(2))).toBe(true);
+            expect(tuple(string(), union(string(), of(undefined))).validate(["a", ,])).toBe(true);
         });
     });
 });

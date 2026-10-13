@@ -318,12 +318,13 @@ describe("the three entry points all narrow for the compiler", () => {
         }).toThrow("Type assertion failed");
     });
 
-    it("requires the methods to be called on the schema, not destructured", () => {
-        // A real papercut: `assertType` and `as` call `this.validate`, so
-        // pulling them off the schema object breaks them at runtime.
+    it("allows the methods to be destructured off the schema", () => {
+        // `assertType` and `as` close over the validation function rather than
+        // reaching through `this`, so pulling them off the schema is safe.
         const { assertType: detached } = commentSchema;
 
-        expect(() => detached({ language: "en", value: "Roadworks" })).toThrow(TypeError);
+        expect(() => detached({ language: "en", value: "Roadworks" })).not.toThrow();
+        expect(() => detached({ language: "it" })).toThrow(new Error("Object validation failed"));
     });
 });
 

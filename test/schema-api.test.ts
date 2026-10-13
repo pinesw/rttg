@@ -321,52 +321,73 @@ describe("Schema<T> runtime API", () => {
         });
     });
 
-    describe("this-binding papercut", () => {
-        // `fromOptions` implements assertType and as as object-literal methods that
-        // call `this.validate(value)`. Detaching them from the schema therefore
-        // loses the receiver and they blow up with a TypeError instead of doing
-        // their job. The correct usage is always `schema.assertType(x)`.
+    describe("methods survive being detached from the schema", () => {
+        // `fromOptions` closes over the validation function directly instead of
+        // reaching for `this.validate(value)`, so assertType and as keep working
+        // when they are pulled off the schema object.
 
-        it("throws when assertType is destructured off the schema", () => {
+        it("works when assertType is destructured off the schema", () => {
             const schema: Schema<string> = string();
             const { assertType: detachedAssertType } = schema;
 
-            expect(() => detachedAssertType("ok")).toThrow(TypeError);
-            expect(() => detachedAssertType("ok")).toThrow(/Cannot read properties of undefined/);
+            expect(() => detachedAssertType("ok")).not.toThrow();
+            expect(detachedAssertType("ok")).toBeUndefined();
         });
 
-        it("works when assertType is called as a method, right next to the broken form", () => {
+        it("still reports a real failure when assertType is destructured", () => {
+            // The error is the schema's own validation error, not a TypeError
+            // about a lost receiver.
+            const schema: Schema<string> = string();
+            const { assertType: detachedAssertType } = schema;
+
+            expect(() => detachedAssertType(1)).toThrow(new Error("Expected string"));
+            expect(() => detachedAssertType(1)).not.toThrow(TypeError);
+        });
+
+        it("works when assertType is called as a method", () => {
             const schema: Schema<string> = string();
 
             expect(() => schema.assertType("ok")).not.toThrow();
             expect(schema.assertType("ok")).toBeUndefined();
         });
 
-        it("throws when as is destructured off the schema", () => {
+        it("works when as is destructured off the schema", () => {
             const schema: Schema<string> = string();
             const { as: detachedAs } = schema;
 
-            expect(() => detachedAs("ok")).toThrow(TypeError);
-            expect(() => detachedAs("ok")).toThrow(/Cannot read properties of undefined/);
+            expect(detachedAs("ok")).toBe("ok");
+            expect(() => detachedAs(1)).toThrow(new Error("Expected string"));
         });
 
-        it("works when as is called as a method, right next to the broken form", () => {
+        it("works when as is called as a method", () => {
             const schema: Schema<string> = string();
 
             expect(schema.as("ok")).toBe("ok");
         });
 
-        it("fails on a VALID value too - the receiver is lost before validation happens", () => {
-            // The TypeError is not a validation failure: it happens for valid and
-            // invalid values alike, since `this.validate` is read first.
+        it("behaves the same for a valid and an invalid value once detached", () => {
+            // Detaching changes nothing: a valid value passes and an invalid one
+            // throws the ordinary validation error.
             const schema: Schema<number> = number();
             const { assertType: detachedAssertType } = schema;
 
-            expect(() => detachedAssertType(1)).toThrow(TypeError);
-            expect(() => detachedAssertType("nope")).toThrow(TypeError);
+            expect(() => detachedAssertType(1)).not.toThrow();
+            expect(() => detachedAssertType("nope")).toThrow(new Error("Expected number"));
         });
 
-        it("survives detaching if the receiver is restored with bind or call", () => {
+        it("works for a detached method of a composite schema", () => {
+            // Not just the primitives: object() and array() go through the same
+            // factory, so their methods detach safely too.
+            const { as: detachedAs } = object({ a: number() });
+            const { assertType: detachedAssertType } = array(string());
+
+            expect(detachedAs({ a: 1 })).toEqual({ a: 1 });
+            expect(() => detachedAs({ a: "x" })).toThrow(new Error("Object validation failed"));
+            expect(() => detachedAssertType(["a"])).not.toThrow();
+            expect(() => detachedAssertType([1])).toThrow(new Error("Array validation failed"));
+        });
+
+        it("still works when the receiver is restored with bind or call", () => {
             const schema: Schema<string> = string();
             const bound: Schema<string>["assertType"] = schema.assertType.bind(schema);
 
@@ -375,14 +396,21 @@ describe("Schema<T> runtime API", () => {
             expect(() => schema.as.call(schema, "ok")).not.toThrow();
         });
 
-        it("does NOT affect validate, which is a plain function and ignores `this`", () => {
-            // Asymmetry worth knowing: validate is assigned straight from the
-            // factory's validationFn, so destructuring it is safe.
+        it("works for validate too, which was always a plain function", () => {
             const schema: Schema<string> = string();
             const { validate: detachedValidate } = schema;
 
             expect(detachedValidate("ok")).toBe(true);
             expect(detachedValidate(1)).toBe(false);
+        });
+
+        it("keeps working after being passed around as a bare callback", () => {
+            // The practical payoff: the methods can be used point-free.
+            const schema: Schema<string> = string();
+            const values: unknown[] = ["a", "b"];
+
+            expect(values.map(schema.as)).toEqual(["a", "b"]);
+            expect(values.every(schema.validate)).toBe(true);
         });
     });
 

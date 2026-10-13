@@ -34,20 +34,44 @@ type IntersectArrayElements<T extends unknown[]> = T extends [infer F, ...infer 
 
 interface CreateOptions<T> {
     validationFn: (value: unknown) => value is T;
-    errorMessage: string;
+
+    /**
+     * The message carried by the error that `assertType` and `as` throw.
+     * Pass a function to build it lazily.
+     */
+    errorMessage: string | (() => string);
+}
+
+/**
+ * Renders a value for an error message.
+ */
+function describeValue(value: unknown): string {
+    try {
+        return String(value);
+    } catch {
+        return Object.prototype.toString.call(value);
+    }
 }
 
 function fromOptions<T>(options: CreateOptions<T>): Schema<T> {
+    // Captured here rather than reached through `this`, so that `assertType` and `as` keep working once they are detached from the schema.
+    const validate = options.validationFn;
+
+    const fail = (): never => {
+        const { errorMessage } = options;
+        throw new Error(typeof errorMessage === "function" ? errorMessage() : errorMessage);
+    };
+
     return {
-        validate: options.validationFn,
+        validate,
         assertType(value): asserts value is T {
-            if (!this.validate(value)) {
-                throw new Error(options.errorMessage);
+            if (!validate(value)) {
+                fail();
             }
         },
         as(value: unknown): T {
-            if (!this.validate(value)) {
-                throw new Error(options.errorMessage);
+            if (!validate(value)) {
+                fail();
             }
             return value as T;
         },
@@ -60,7 +84,8 @@ function fromOptions<T>(options: CreateOptions<T>): Schema<T> {
 export function of<T>(value: T): Schema<T> {
     return fromOptions({
         validationFn: (v): v is T => v === value,
-        errorMessage: `Expected ${value}`,
+        // Built lazily: a value that cannot be stringified must not take the of() call itself down with it.
+        errorMessage: () => `Expected ${describeValue(value)}`,
     });
 }
 
@@ -120,8 +145,11 @@ export function object<T extends {}>(schema: { [K in keyof T]: Schema<T[K]> }) {
             if (typeof value !== "object" || value === null) {
                 return false;
             }
-            for (const key in schema) {
-                if (!(key in value) || !schema[key].validate((value as Record<string, unknown>)[key])) {
+            const record = value as Record<PropertyKey, unknown>;
+            // Reflect.ownKeys rather than for-in: for-in never enumerates symbol keys, so every symbol-keyed sub-schema would be skipped silently.
+            for (const key of Reflect.ownKeys(schema) as (keyof T)[]) {
+                // An own-property check rather than `in`, which walks the prototype chain: inherited data must not satisfy a schema.
+                if (!Object.prototype.hasOwnProperty.call(value, key) || !schema[key].validate(record[key])) {
                     return false;
                 }
             }
@@ -140,7 +168,14 @@ export function array<T>(schema: Schema<T>) {
             if (!Array.isArray(value)) {
                 return false;
             }
-            return value.every((item) => schema.validate(item));
+            // An index loop rather than every(), which skips the holes of a sparse array and would let `new Array(3)` pass as number[].
+            // Reading a hole yields undefined, so a hole is validated as such.
+            for (let index = 0; index < value.length; index++) {
+                if (!schema.validate(value[index])) {
+                    return false;
+                }
+            }
+            return true;
         },
         errorMessage: "Array validation failed",
     });
@@ -158,7 +193,13 @@ export function tuple<T extends unknown[]>(...schemas: { [K in keyof T]: Schema<
             if (value.length !== schemas.length) {
                 return false;
             }
-            return value.every((item, index) => schemas[index]?.validate(item));
+            // An index loop, for the same reason as array(): every() would skip the holes of a sparse array and pass the tuple vacuously.
+            for (let index = 0; index < value.length; index++) {
+                if (!schemas[index]?.validate(value[index])) {
+                    return false;
+                }
+            }
+            return true;
         },
         errorMessage: "Tuple validation failed",
     });

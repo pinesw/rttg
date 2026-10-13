@@ -366,12 +366,15 @@ describe("union() and intersection() composed with the other combinators", () =>
         expect(mixed.validate([1, true])).toBe(false);
         expect(mixed.validate([1, null])).toBe(false);
         expect(mixed.validate("ab")).toBe(false);
-        // A HOLE is skipped by Array.prototype.every(), so a sparse array
-        // passes vacuously even though no element matches the union. This is a
-        // genuine bug in the library, recorded here as current behaviour.
-        expect(mixed.validate(new Array(3))).toBe(true);
-        // A present undefined, by contrast, is a real element and is checked.
+        // A HOLE reads as undefined and is checked like any other element, so a
+        // sparse array no longer passes vacuously.
+        expect(mixed.validate(new Array(3))).toBe(false);
+        // A present undefined is rejected for exactly the same reason.
         expect(mixed.validate([undefined])).toBe(false);
+        // Widening the union to admit undefined accepts both.
+        const optional = array(union(number(), string(), of(undefined)));
+        expect(optional.validate(new Array(3))).toBe(true);
+        expect(optional.validate([1, , "two"])).toBe(true);
     });
 
     it("validates an object whose property is a union of objects", () => {
