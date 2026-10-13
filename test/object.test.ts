@@ -24,7 +24,7 @@ describe("object()", () => {
         it("accepts an object with superfluous properties at runtime", () => {
             // Documented, intentional behaviour: extra keys are ignored at runtime.
             // Drift of this kind is caught at COMPILE time instead, by annotating the
-            // schema as `Schema<T>` - the `bivarianceHack` property makes `T` bivariant,
+            // schema as `Schema<T>` - the `invarianceHack` property makes `T` invariant,
             // so a schema carrying extra keys is no longer assignable.
             const schema = object({ name: string() });
 

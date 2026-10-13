@@ -22,10 +22,10 @@ export interface Schema<T> {
     as(value: unknown): T;
 
     /**
-     * A hack to make the schema type parameter `T` bivariant.
+     * A hack to make the schema type parameter `T` invariant.
      * Ignore this property; its only purpose is to influence TypeScript's type inference.
      */
-    bivarianceHack?: (arg: T) => void;
+    invarianceHack?: (arg: T) => void;
 }
 
 type IntersectArrayElements<T extends unknown[]> = T extends [infer F, ...infer R]

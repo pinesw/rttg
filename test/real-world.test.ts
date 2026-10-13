@@ -7,7 +7,7 @@ import { array, assertType, number, object, of, string, union, type Schema } fro
  * Every schema below is annotated `Schema<SomeInterface>`, which is the whole
  * point of the library - the annotation makes the compiler reject a schema that
  * has drifted from the interface (wrong property type, missing property, or a
- * superfluous property via `bivarianceHack`). The runtime assertions then prove
+ * superfluous property via `invarianceHack`). The runtime assertions then prove
  * the same schema actually guards the values it claims to.
  */
 

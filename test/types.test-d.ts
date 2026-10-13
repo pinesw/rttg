@@ -130,11 +130,11 @@ describe("inference", () => {
         >();
     });
 
-    it("exposes bivarianceHack as an optional property on the inferred schema", () => {
+    it("exposes invarianceHack as an optional property on the inferred schema", () => {
         // The hack is load-bearing for the superfluous-property check below, so
         // pin its exact type here too.
         expectTypeOf(string())
-            .toHaveProperty("bivarianceHack")
+            .toHaveProperty("invarianceHack")
             .toEqualTypeOf<((arg: string) => void) | undefined>();
     });
 });
@@ -247,7 +247,7 @@ describe("Schema<T> annotation rejects a drifted schema", () => {
     });
 
     it("rejects a superfluous property", () => {
-        // This is the case only `bivarianceHack` can catch: the wider payload type
+        // This is the case only `invarianceHack` can catch: the wider payload type
         // is still assignable to Comment, so validate()/as() stay happy and the
         // extra key would slip through without the hack.
         // @ts-expect-error `created_at` is not a property of Comment
@@ -263,7 +263,7 @@ describe("Schema<T> annotation rejects a drifted schema", () => {
         ).not.toEqualTypeOf<Schema<Comment>>();
     });
 
-    it("rejects the superfluous property only because of bivarianceHack", () => {
+    it("rejects the superfluous property only because of invarianceHack", () => {
         // The payload type itself is perfectly assignable to Comment ...
         interface WithExtra {
             language: string;
@@ -274,12 +274,12 @@ describe("Schema<T> annotation rejects a drifted schema", () => {
         expectTypeOf<WithExtra>().toExtend<Comment>();
 
         // ... yet Schema<WithExtra> is not assignable to Schema<Comment>, which can
-        // only come from the contravariant bivarianceHack parameter. A refactor
+        // only come from the contravariant invarianceHack parameter. A refactor
         // that dropped that property would silently lose this rejection - which the
         // `not.toExtend` below states directly, without relying on the directive.
         expectTypeOf<Schema<WithExtra>>().not.toExtend<Schema<Comment>>();
 
-        // @ts-expect-error Schema<T> is invariant in T thanks to bivarianceHack
+        // @ts-expect-error Schema<T> is invariant in T thanks to invarianceHack
         const schema: Schema<Comment> = {} as Schema<WithExtra>;
 
         expectTypeOf(schema).toEqualTypeOf<Schema<Comment>>();
@@ -324,7 +324,7 @@ describe("Schema<T> annotation rejects a drifted nested schema", () => {
     });
 
     it("rejects a superfluous property inside the nested array", () => {
-        // Again caught by bivarianceHack, this time through array() -> object().
+        // Again caught by invarianceHack, this time through array() -> object().
         // @ts-expect-error comments[].created_at is not a property of Comment
         const schema: Schema<Thread> = object({
             title: string(),
@@ -350,7 +350,7 @@ describe("Schema<T> annotation rejects a schema for an optional property", () =>
         // The compile-time half of "optional properties are not expressible"
         // (object.test.ts covers the runtime half: the key must be PRESENT).
         // An optional property is not the same as a required one that may be
-        // undefined, so TypeScript blames bivarianceHack - Draft is not
+        // undefined, so TypeScript blames invarianceHack - Draft is not
         // assignable to { title: string | undefined }. If the mapped type inside
         // object() were ever relaxed to a Partial-like form, the library would
         // start claiming support for optional properties it cannot check, and

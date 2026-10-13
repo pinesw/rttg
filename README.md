@@ -144,14 +144,14 @@ const commentSchema: Schema<Comment> = object({
 
 ```
 comment-schema.ts(9,7): error TS2322: Type 'Schema<{ id: number; body: string; pinned: boolean; authorId: number; }>' is not assignable to type 'Schema<Comment>'.
-  Types of property 'bivarianceHack' are incompatible.
+  Types of property 'invarianceHack' are incompatible.
     Type '((arg: { id: number; body: string; pinned: boolean; authorId: number; }) => void) | undefined' is not assignable to type '((arg: Comment) => void) | undefined'.
       Type '(arg: { id: number; body: string; pinned: boolean; authorId: number; }) => void' is not assignable to type '(arg: Comment) => void'.
         Types of parameters 'arg' and 'arg' are incompatible.
           Property 'authorId' is missing in type 'Comment' but required in type '{ id: number; body: string; pinned: boolean; authorId: number; }'.
 ```
 
-### Why the third case needs `bivarianceHack`
+### Why the third case needs `invarianceHack`
 
 Notice which property each error blames. The first two are caught by `validate`, whose
 `value is T` return position makes `Schema<T>` **covariant** in `T`: a schema for a *narrower*
@@ -162,7 +162,7 @@ object type is a subtype of `Comment`.
 So `Schema<T>` carries one extra, never-called property:
 
 ```ts
-bivarianceHack?: (arg: T) => void;
+invarianceHack?: (arg: T) => void;
 ```
 
 As a *property* holding a function (not a method), `strictFunctionTypes` checks it
@@ -273,13 +273,13 @@ interface Schema<T> {
     validate(value: unknown): value is T;
     assertType(value: unknown): asserts value is T;
     as(value: unknown): T;
-    bivarianceHack?: (arg: T) => void;
+    invarianceHack?: (arg: T) => void;
 }
 ```
 
 Use it as an annotation (`const s: Schema<Comment> = ...`) and as a parameter type when you write
-functions that take schemas. `bivarianceHack` is explained
-[above](#why-the-third-case-needs-bivariancehack); ignore it otherwise.
+functions that take schemas. `invarianceHack` is explained
+[above](#why-the-third-case-needs-invariancehack); ignore it otherwise.
 
 All three methods are closures over the schema's own validation function rather than `this`, so
 they can be destructured or passed as bare callbacks: `const { as } = string(); values.map(as)`
@@ -592,7 +592,7 @@ const draftSchema: Schema<Draft> = object({
 
 ```
 draft-schema.ts(7,7): error TS2322: Type 'Schema<{ title: string | undefined; }>' is not assignable to type 'Schema<Draft>'.
-  Types of property 'bivarianceHack' are incompatible.
+  Types of property 'invarianceHack' are incompatible.
     Type '((arg: { title: string | undefined; }) => void) | undefined' is not assignable to type '((arg: Draft) => void) | undefined'.
       Type '(arg: { title: string | undefined; }) => void' is not assignable to type '(arg: Draft) => void'.
         Types of parameters 'arg' and 'arg' are incompatible.
