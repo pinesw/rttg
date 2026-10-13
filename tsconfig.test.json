@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "lib": ["es2022"],
+    "types": ["node"],
+    "paths": {
+      "@pinesw/rttg": ["./index.ts"]
+    }
+  },
+  "include": ["index.ts", "test/**/*.ts", "vitest.config.mts"]
+}
